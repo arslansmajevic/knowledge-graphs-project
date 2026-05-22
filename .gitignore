@@ -1,5 +1,5 @@
 # Data and generated artifacts
-dataset/*
+dataset/
 generated-files/
 redteam_scores.csv
 
