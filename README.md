@@ -44,12 +44,31 @@ python pipeline.py
 
 That single command runs the whole project end to end and prints the detection
 metrics (ROC-AUC, average precision and the score distributions). All artifacts
-are written to `generated-files/` and the trained model to `pykeen-lanl-model/`.
+are written to `generated-files/` and the trained models to
+`pykeen-lanl-model/<model>/`.
 
 While it runs you'll see live progress: each step is announced with a
 `[i/n] step` header and a timing summary, the build step prints `tqdm` progress
 bars for each input file (auth/dns/flows/proc), and PyKEEN shows its own
 training progress bars.
+
+## Run it faster on a free GPU (Google Colab)
+
+Training and evaluation are much faster on a GPU. If your local machine only has
+a CPU, run the pipeline on a free Colab GPU instead — PyKEEN auto-detects CUDA,
+so no code changes are needed.
+
+1. Open [`colab.ipynb`](colab.ipynb) in Google Colab
+   ([colab.research.google.com](https://colab.research.google.com/) → *File →
+   Open notebook → GitHub*, or upload the file).
+2. Enable the GPU: **Runtime → Change runtime type → Hardware accelerator → GPU**.
+3. Run the cells in order. The notebook clones the repo, installs the
+   requirements, helps you make the LANL dataset available (via Google Drive, since
+   the raw logs are not committed), and then runs `python pipeline.py` on the GPU.
+
+The notebook also shows how to run individual steps and how to copy the results
+back to Drive so they survive Colab's ephemeral sessions.
+
 
 ### What the pipeline does
 
@@ -59,14 +78,17 @@ training progress bars.
    knowledge-graph triples (`generated-files/triples.tsv`). By default only the
    first day of events is used to keep the graph small (see `MAX_TIME` in
    `pipeline.py`).
-2. **train** – trains a PyKEEN embedding model (`TransE` by default) on the
-   triples and saves it to `pykeen-lanl-model/`.
+2. **train** – trains the configured PyKEEN embedding models (`TransE` and
+   `DistMult` by default) on the triples and saves each one to
+   `pykeen-lanl-model/<model>/`.
 3. **score** – scores the red-team triples and a random sample of normal
-   triples, writing `generated-files/redteam_scores.csv` and
-   `generated-files/normal_scores.csv`.
-4. **evaluate** – treats the model score as an anomaly score (lower plausibility
-   = more anomalous) and reports ROC-AUC, average precision and per-class score
-   statistics.
+   triples with every trained model, writing
+   `generated-files/redteam_scores_<model>.csv` and
+   `generated-files/normal_scores_<model>.csv`.
+4. **evaluate** – treats each model score as an anomaly score (lower
+   plausibility = more anomalous), reports ROC-AUC, average precision and
+   per-class score statistics per model, and prints a side-by-side comparison
+   table ranking the models.
 
 ### Running individual steps
 
@@ -83,6 +105,24 @@ See all options with `python pipeline.py --help`. Model and graph settings
 (embedding dimension, epochs, sample size, time window, ...) live as constants
 at the top of `pipeline.py`.
 
+### Choosing which models to train
+
+The `train`/`score`/`evaluate` steps run over every model listed in the
+`MODELS` constant at the top of `pipeline.py`:
+
+```python
+MODELS = ["TransE", "DistMult"]
+```
+
+Add or remove any model name from
+[PyKEEN's model registry](https://pykeen.readthedocs.io/en/stable/reference/models.html)
+(e.g. `"ComplEx"`, `"RotatE"`, `"TransH"`) and each will be trained, scored and
+evaluated independently. The `evaluate` step prints a side-by-side comparison
+table ranking the models by ROC-AUC. Every model uses `embedding_dim`
+(`EMBEDDING_DIM`); to pass extra/override hyper-parameters to a specific model,
+add an entry to the `MODEL_KWARGS` dict, e.g.
+`MODEL_KWARGS = {"RotatE": {"embedding_dim": 128}}`.
+
 ### Keeping the run time reasonable
 
 Two things dominate the run time, and both are tunable via constants at the top
@@ -95,9 +135,29 @@ of `pipeline.py`:
   full test split. `EVAL_SAMPLE_SIZE` (default `10_000`) evaluates on a random
   subsample instead, finishing in seconds while still giving a meaningful
   quality estimate; set it to `None` to evaluate on the full split.
-  `EVAL_BATCH_SIZE` avoids PyKEEN's very conservative automatic CPU batch size.
+  The eval batch size avoids PyKEEN's very conservative automatic CPU batch size.
 
 The trained model is unaffected by `EVAL_SAMPLE_SIZE` — it only changes how many
 triples are used to *measure* quality, so the downstream `score`/`evaluate`
 steps still use the full model.
+
+### GPU acceleration
+
+The `train` step auto-detects CUDA and, when a GPU is present, uses it
+automatically — no flags required. It also prints the selected device and tunes
+the workload to it:
+
+- **Device** – the model and PyKEEN pipeline run on `cuda` when a GPU is
+  available, otherwise on `cpu`.
+- **Batch size** – GPUs handle far larger batches than CPUs, so training and
+  evaluation use bigger batches on a GPU (`GPU_BATCH_SIZE` / `GPU_EVAL_BATCH_SIZE`)
+  and smaller ones on a CPU (`CPU_BATCH_SIZE` / `CPU_EVAL_BATCH_SIZE`). Larger
+  batches keep the GPU busy and train faster; raise `GPU_BATCH_SIZE` further if
+  your GPU has spare memory, or lower it if you hit out-of-memory errors.
+- **Data loading** – on a GPU, `GPU_NUM_WORKERS` DataLoader workers plus pinned
+  memory overlap batch preparation with compute so the GPU does not idle waiting
+  for data.
+
+All of these are constants at the top of `pipeline.py`. To run the whole thing
+on a free GPU, see [Run it faster on a free GPU (Google Colab)](#run-it-faster-on-a-free-gpu-google-colab).
 
