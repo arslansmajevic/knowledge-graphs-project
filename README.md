@@ -52,6 +52,24 @@ While it runs you'll see live progress: each step is announced with a
 bars for each input file (auth/dns/flows/proc), and PyKEEN shows its own
 training progress bars.
 
+## Run it faster on a free GPU (Google Colab)
+
+Training and evaluation are much faster on a GPU. If your local machine only has
+a CPU, run the pipeline on a free Colab GPU instead — PyKEEN auto-detects CUDA,
+so no code changes are needed.
+
+1. Open [`colab.ipynb`](colab.ipynb) in Google Colab
+   ([colab.research.google.com](https://colab.research.google.com/) → *File →
+   Open notebook → GitHub*, or upload the file).
+2. Enable the GPU: **Runtime → Change runtime type → Hardware accelerator → GPU**.
+3. Run the cells in order. The notebook clones the repo, installs the
+   requirements, helps you make the LANL dataset available (via Google Drive, since
+   the raw logs are not committed), and then runs `python pipeline.py` on the GPU.
+
+The notebook also shows how to run individual steps and how to copy the results
+back to Drive so they survive Colab's ephemeral sessions.
+
+
 ### What the pipeline does
 
 `pipeline.py` runs four steps in order:
