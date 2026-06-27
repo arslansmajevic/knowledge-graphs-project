@@ -43,7 +43,7 @@ python pipeline.py
 ```
 
 That single command runs the whole project end to end and prints the detection
-metrics (ROC-AUC, average precision and the score distributions). All artefacts
+metrics (ROC-AUC, average precision and the score distributions). All artifacts
 are written to `generated-files/` and the trained model to `pykeen-lanl-model/`.
 
 ### What the pipeline does

@@ -11,7 +11,7 @@ This performs, in order:
     3. score   - score the red-team (malicious) and a sample of normal triples
     4. evaluate- compare the two score distributions (ROC-AUC, AP, ...)
 
-Each step writes its artefacts to ``generated-files/`` (and the trained model to
+Each step writes its artifacts to ``generated-files/`` (and the trained model to
 ``pykeen-lanl-model/``) so steps can also be run individually, e.g.::
 
     python pipeline.py --steps train score evaluate
