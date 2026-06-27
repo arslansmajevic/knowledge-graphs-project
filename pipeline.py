@@ -56,6 +56,14 @@ EPOCHS = 20
 BATCH_SIZE = 1024
 RANDOM_STATE = 42
 
+# Evaluation speed/accuracy trade-off. Ranking every test triple against all
+# ~110k entities on CPU takes many hours, so by default we evaluate on a random
+# subsample of the held-out test triples. Set ``EVAL_SAMPLE_SIZE = None`` to
+# evaluate on the full test split. ``EVAL_BATCH_SIZE`` avoids PyKEEN's very
+# conservative automatic batch size (32) on CPU.
+EVAL_SAMPLE_SIZE = 10_000
+EVAL_BATCH_SIZE = 256
+
 # Number of normal triples sampled as the "benign" class when evaluating.
 NORMAL_SAMPLE_SIZE = 10_000
 
@@ -208,13 +216,30 @@ def train() -> None:
     print(f"[train] {tf}")
 
     training, testing = tf.split([0.8, 0.2], random_state=RANDOM_STATE)
+
+    # Evaluating every held-out triple against all entities is the slow part of
+    # the pipeline. Subsample the test split so evaluation finishes in seconds
+    # while still giving a meaningful estimate of model quality.
+    eval_factory = testing
+    if EVAL_SAMPLE_SIZE is not None and testing.num_triples > EVAL_SAMPLE_SIZE:
+        import torch
+
+        generator = torch.Generator().manual_seed(RANDOM_STATE)
+        idx = torch.randperm(testing.num_triples, generator=generator)[:EVAL_SAMPLE_SIZE]
+        eval_factory = testing.clone_and_exchange_triples(testing.mapped_triples[idx])
+        print(
+            f"[train] evaluating on a random sample of {eval_factory.num_triples:,} "
+            f"of {testing.num_triples:,} test triples"
+        )
+
     result = pykeen_pipeline(
         training=training,
-        testing=testing,
+        testing=eval_factory,
         model=MODEL_NAME,
         epochs=EPOCHS,
         model_kwargs=dict(embedding_dim=EMBEDDING_DIM),
         training_kwargs=dict(batch_size=BATCH_SIZE),
+        evaluation_kwargs=dict(batch_size=EVAL_BATCH_SIZE),
     )
     result.save_to_directory(str(MODEL_DIR))
     print(f"[train] Saved model to {MODEL_DIR}")

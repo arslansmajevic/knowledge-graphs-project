@@ -82,3 +82,22 @@ python pipeline.py --steps score evaluate
 See all options with `python pipeline.py --help`. Model and graph settings
 (embedding dimension, epochs, sample size, time window, ...) live as constants
 at the top of `pipeline.py`.
+
+### Keeping the run time reasonable
+
+Two things dominate the run time, and both are tunable via constants at the top
+of `pipeline.py`:
+
+- **Graph size** – `MAX_TIME` keeps only the first day of events (set to `None`
+  to use everything). A bigger window means more triples and slower training.
+- **Evaluation** – PyKEEN's link-prediction evaluation ranks every held-out
+  triple against all ~110k entities, which on CPU can take many hours for the
+  full test split. `EVAL_SAMPLE_SIZE` (default `10_000`) evaluates on a random
+  subsample instead, finishing in seconds while still giving a meaningful
+  quality estimate; set it to `None` to evaluate on the full split.
+  `EVAL_BATCH_SIZE` avoids PyKEEN's very conservative automatic CPU batch size.
+
+The trained model is unaffected by `EVAL_SAMPLE_SIZE` — it only changes how many
+triples are used to *measure* quality, so the downstream `score`/`evaluate`
+steps still use the full model.
+
