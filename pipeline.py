@@ -52,7 +52,7 @@ MAX_TIME = 24 * 60 * 60
 # Training hyper-parameters.
 MODEL_NAME = "TransE"
 EMBEDDING_DIM = 64
-EPOCHS = 20
+EPOCHS = 5
 BATCH_SIZE = 1024
 RANDOM_STATE = 42
 
