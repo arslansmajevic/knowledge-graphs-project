@@ -1,0 +1,71 @@
+{
+  "_comment": [
+    "A small, curated slice of the MITRE ATT&CK Enterprise knowledge base.",
+    "The full knowledge base is openly published by MITRE as STIX 2.1 JSON",
+    "(https://github.com/mitre/cti). We bundle a hand-picked subset here so the",
+    "pipeline works fully offline; mitre.py can also fetch the live STIX bundle",
+    "and fall back to this file when the network is unavailable.",
+    "Each technique records which LANL log signal (a knowledge-graph relation",
+    "produced by pipeline.build) it can be detected through, which is what lets",
+    "us link the ATT&CK knowledge base to the log-derived graph (LO4/LO7)."
+  ],
+  "source": "MITRE ATT&CK Enterprise (curated subset)",
+  "version": "subset-1.0",
+  "tactics": [
+    {"id": "TA0001", "name": "Initial Access"},
+    {"id": "TA0002", "name": "Execution"},
+    {"id": "TA0006", "name": "Credential Access"},
+    {"id": "TA0008", "name": "Lateral Movement"},
+    {"id": "TA0011", "name": "Command and Control"}
+  ],
+  "techniques": [
+    {
+      "id": "T1078",
+      "name": "Valid Accounts",
+      "tactic": "TA0001",
+      "parent": null,
+      "description": "Adversaries obtain and abuse credentials of existing accounts to gain access.",
+      "log_signals": ["logs_on_to", "authenticates_as"]
+    },
+    {
+      "id": "T1021",
+      "name": "Remote Services",
+      "tactic": "TA0008",
+      "parent": null,
+      "description": "Adversaries use valid accounts to log into a service that accepts remote connections.",
+      "log_signals": ["authenticates_to"]
+    },
+    {
+      "id": "T1021.001",
+      "name": "Remote Desktop Protocol",
+      "tactic": "TA0008",
+      "parent": "T1021",
+      "description": "Adversaries use RDP to move laterally between hosts.",
+      "log_signals": ["authenticates_to"]
+    },
+    {
+      "id": "T1021.002",
+      "name": "SMB/Windows Admin Shares",
+      "tactic": "TA0008",
+      "parent": "T1021",
+      "description": "Adversaries use SMB and administrative shares to move laterally.",
+      "log_signals": ["authenticates_to", "flows_to"]
+    },
+    {
+      "id": "T1059",
+      "name": "Command and Scripting Interpreter",
+      "tactic": "TA0002",
+      "parent": null,
+      "description": "Adversaries abuse command and script interpreters to execute commands.",
+      "log_signals": ["starts_process", "runs_process"]
+    },
+    {
+      "id": "T1071",
+      "name": "Application Layer Protocol",
+      "tactic": "TA0011",
+      "parent": null,
+      "description": "Adversaries communicate using application layer protocols such as DNS to blend in with normal traffic.",
+      "log_signals": ["dns_resolves", "flows_to"]
+    }
+  ]
+}

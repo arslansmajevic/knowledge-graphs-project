@@ -1,9 +1,22 @@
-# Knowledge-Graph Anomaly Detection on the LANL Dataset
+# Knowledge-Graph APT Detection on the LANL Dataset
 
 This project turns the [LANL "Comprehensive, Multi-Source Cyber-Security Events"](https://csr.lanl.gov/data/cyber1/)
-logs into a knowledge graph, trains a graph-embedding model on it, and uses the
-model to score how *plausible* known red-team (malicious) authentication events
-are compared to normal activity. Implausible events are flagged as anomalies.
+logs into a knowledge graph and detects Advanced-Persistent-Threat (APT)
+lateral movement with a **hybrid** approach that combines two kinds of
+reasoning over the same graph:
+
+* a **symbolic** half — a small Datalog reasoner that encodes MITRE ATT&CK /
+  cyber-kill-chain rules (lateral movement, attack chains), and
+* a **sub-symbolic** half — knowledge-graph embeddings (PyKEEN) that score how
+  *plausible* known red-team (malicious) events are versus normal activity.
+
+Implausible events are flagged as anomalies, and the logical reasoner's output
+both *feeds into* the embedding graph and *combines with* the embedding score to
+form the final hybrid detector.
+
+See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full architecture, the engine
+choice (and how it relates to Vadalog), the two-data-model comparison, and the
+mapping of every component to the course learning outcomes (LO1–LO12).
 
 ## The dataset
 
@@ -72,23 +85,60 @@ back to Drive so they survive Colab's ephemeral sessions.
 
 ### What the pipeline does
 
-`pipeline.py` runs four steps in order:
+`pipeline.py` runs five steps in order:
 
 1. **build** – parses `auth/proc/flows/dns` into a deduplicated set of
-   knowledge-graph triples (`generated-files/triples.tsv`). By default only the
-   first day of events is used to keep the graph small (see `MAX_TIME` in
-   `pipeline.py`).
-2. **train** – trains the configured PyKEEN embedding models (`TransE` and
-   `DistMult` by default) on the triples and saves each one to
-   `pykeen-lanl-model/<model>/`.
-3. **score** – scores the red-team triples and a random sample of normal
+   knowledge-graph triples (`generated-files/triples.tsv`) and ingests the
+   **MITRE ATT&CK** knowledge base (`generated-files/mitre_triples.tsv`),
+   linking each technique to the log signal it is detected through. By default
+   only the first day of events is used to keep the graph small (see `MAX_TIME`
+   in `pipeline.py`).
+2. **reason** – runs the symbolic reasoner (`reasoning.py`): a small Datalog
+   engine that applies MITRE-mapped rules with *full recursion* (lateral-movement
+   transitive closure) and *object creation* (minting `attack_chain` entities).
+   It writes the derived triples (`derived_triples.tsv`), the flagged-entity
+   logical signal (`flagged_entities.txt`), and the materialised chains
+   (`attack_chains.json`).
+3. **train** – trains the configured PyKEEN embedding models (`TransE`,
+   `DistMult`, `RotatE`, `ComplEx` by default) on the combined graph (log +
+   MITRE + derived triples) and saves each one to `pykeen-lanl-model/<model>/`.
+4. **score** – scores the red-team triples and a random sample of normal
    triples with every trained model, writing
    `generated-files/redteam_scores_<model>.csv` and
    `generated-files/normal_scores_<model>.csv`.
-4. **evaluate** – treats each model score as an anomaly score (lower
-   plausibility = more anomalous), reports ROC-AUC, average precision and
-   per-class score statistics per model, and prints a side-by-side comparison
-   table ranking the models.
+5. **evaluate** – treats each model score as an anomaly score (lower
+   plausibility = more anomalous) and reports **both** the pure-KGE baseline and
+   the **hybrid** detector (KGE anomaly score + the reasoner's logical flag),
+   with a side-by-side ROC-AUC / average-precision comparison per model.
+
+An optional **evolve** step (`python pipeline.py --steps evolve`) demonstrates
+Knowledge-Graph evolution (LO8): it rebuilds the graph over a larger time window
+(`EVOLVE_TIME`), reports how many triples were added, and re-runs the reasoner,
+training, scoring and evaluation on the evolved graph.
+
+### The SOC dashboard
+
+A Streamlit console (`app.py`) is the services layer over the graph. After
+running the pipeline, launch it with:
+
+```bash
+streamlit run app.py
+```
+
+It reads only the artifacts in `generated-files/` (no GPU or raw logs needed)
+and provides three tabs: an **overview** of the graph, **detections**
+(KGE-only vs hybrid metrics, score distributions, top-ranked anomalies), and
+**attack chains** — including the query *"show attack chains involving computer
+X."*
+
+### Tests
+
+The logical reasoner, MITRE ingestion and hybrid scoring are covered by tests
+that run without the dataset or PyKEEN:
+
+```bash
+pytest
+```
 
 ### Running individual steps
 
@@ -97,13 +147,16 @@ retraining:
 
 ```bash
 python pipeline.py --steps build
+python pipeline.py --steps reason
 python pipeline.py --steps train
 python pipeline.py --steps score evaluate
 ```
 
-See all options with `python pipeline.py --help`. Model and graph settings
-(embedding dimension, epochs, sample size, time window, ...) live as constants
-at the top of `pipeline.py`.
+`reason` only needs `build` to have run; `train` picks up the derived and MITRE
+triples automatically if they exist (toggle with `INCLUDE_DERIVED_TRIPLES` /
+`INCLUDE_MITRE_TRIPLES`). See all options with `python pipeline.py --help`.
+Model and graph settings (embedding dimension, epochs, sample size, time window,
+hybrid weight, ...) live as constants at the top of `pipeline.py`.
 
 ### Choosing which models to train
 
@@ -111,7 +164,7 @@ The `train`/`score`/`evaluate` steps run over every model listed in the
 `MODELS` constant at the top of `pipeline.py`:
 
 ```python
-MODELS = ["TransE", "DistMult"]
+MODELS = ["TransE", "DistMult", "RotatE", "ComplEx"]
 ```
 
 Add or remove any model name from

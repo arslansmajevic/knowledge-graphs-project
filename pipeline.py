@@ -28,6 +28,10 @@ from pathlib import Path
 
 import pandas as pd
 
+import hybrid
+import mitre
+import reasoning
+
 try:
     from tqdm import tqdm
 except ImportError:  # tqdm is optional; fall back to a no-op wrapper.
@@ -43,9 +47,33 @@ MODEL_DIR = Path("pykeen-lanl-model")
 
 TRIPLES_PATH = GEN_DIR / "triples.tsv"
 
+# Artifacts produced by the logical/knowledge components.
+MITRE_TRIPLES_PATH = GEN_DIR / "mitre_triples.tsv"      # ATT&CK knowledge base
+DERIVED_TRIPLES_PATH = GEN_DIR / "derived_triples.tsv"  # Datalog-derived facts
+FLAGGED_PATH = GEN_DIR / "flagged_entities.txt"         # logical anomaly signal
+CHAINS_PATH = GEN_DIR / "attack_chains.json"            # minted attack chains
+
 # Only keep the first day of events to keep the graph small. Set to ``None`` to
 # use every event in the dataset.
 MAX_TIME = 24 * 60 * 60
+
+# --- Hybrid (logical + sub-symbolic) settings -------------------------------- #
+# Whether to ingest the MITRE ATT&CK knowledge base and fold it into the graph
+# the embeddings are trained on (a second data model alongside the logs).
+INCLUDE_MITRE_TRIPLES = True
+# Whether to feed the Datalog-derived triples (lateral_movement, attack chains,
+# ...) back into the embedding graph as logical "provenance" metadata.
+INCLUDE_DERIVED_TRIPLES = True
+# Maximum lateral-movement chain length the reasoner explores (bounds the
+# recursive transitive closure on large graphs).
+MAX_CHAIN_DEPTH = 6
+# Weight of the logical flag when combined with the standardised KGE anomaly
+# score in the hybrid detector (see ``hybrid.py``).
+HYBRID_LAMBDA = 1.0
+
+# For the ``evolve`` step (LO8): the later time window (in seconds) used to
+# simulate the Knowledge Graph growing as new logs arrive.
+EVOLVE_TIME = 2 * 24 * 60 * 60
 
 # Training hyper-parameters.
 #
@@ -88,7 +116,7 @@ GPU_EVAL_BATCH_SIZE = 4096
 # Number of normal triples sampled as the "benign" class when evaluating.
 NORMAL_SAMPLE_SIZE = 100_000
 
-ALL_STEPS = ("build", "train", "score", "evaluate")
+ALL_STEPS = ("build", "reason", "train", "score", "evaluate")
 
 
 # --------------------------------------------------------------------------- #
@@ -147,10 +175,10 @@ def _add(triples, h, r, t):
         triples.add((h, r, t))
 
 
-def _read_csv(name, columns):
+def _read_csv(name, columns, max_time=MAX_TIME):
     df = pd.read_csv(DATA_DIR / name, names=columns, compression="infer")
-    if MAX_TIME is not None:
-        df = df[df["time"] <= MAX_TIME]
+    if max_time is not None:
+        df = df[df["time"] <= max_time]
     print(f"[build]   read {name}: {len(df):,} rows")
     return df
 
@@ -178,8 +206,13 @@ def _redteam_candidate_triples():
 # --------------------------------------------------------------------------- #
 # Step 1: build the knowledge graph
 # --------------------------------------------------------------------------- #
-def build() -> None:
-    """Turn the raw LANL logs into a PyKEEN-compatible triples file."""
+def build(max_time=MAX_TIME, triples_path: Path = TRIPLES_PATH) -> None:
+    """Turn the raw LANL logs into a PyKEEN-compatible triples file.
+
+    Also ingests the MITRE ATT&CK knowledge base as a second data model
+    (``INCLUDE_MITRE_TRIPLES``), linking ATT&CK techniques to the log signals
+    they are detected through so both live in one knowledge graph (LO4/LO7).
+    """
     GEN_DIR.mkdir(parents=True, exist_ok=True)
     triples: set = set()
 
@@ -190,6 +223,7 @@ def build() -> None:
             "time", "src_user", "dst_user", "src_computer", "dst_computer",
             "auth_type", "logon_type", "orientation", "result",
         ],
+        max_time=max_time,
     )
     for row in tqdm(auth.itertuples(index=False), total=len(auth),
                     desc="[build] auth", unit="row"):
@@ -202,7 +236,8 @@ def build() -> None:
         _add(triples, su, "authenticates_as", du)
 
     # dns.txt: DNS lookups
-    dns = _read_csv("dns.txt", ["time", "src_computer", "resolved_computer"])
+    dns = _read_csv("dns.txt", ["time", "src_computer", "resolved_computer"],
+                    max_time=max_time)
     for row in tqdm(dns.itertuples(index=False), total=len(dns),
                     desc="[build] dns", unit="row"):
         _add(triples, _computer(row.src_computer), "dns_resolves",
@@ -215,6 +250,7 @@ def build() -> None:
             "time", "duration", "src_computer", "src_port", "dst_computer",
             "dst_port", "protocol", "packet_count", "byte_count",
         ],
+        max_time=max_time,
     )
     for row in tqdm(flows.itertuples(index=False), total=len(flows),
                     desc="[build] flows", unit="row"):
@@ -224,7 +260,8 @@ def build() -> None:
         _add(triples, dc, "uses_dst_port", _port(row.dst_port))
 
     # proc.txt: process start/stop events
-    proc = _read_csv("proc.txt", ["time", "user", "computer", "process", "action"])
+    proc = _read_csv("proc.txt", ["time", "user", "computer", "process", "action"],
+                     max_time=max_time)
     for row in tqdm(proc.itertuples(index=False), total=len(proc),
                     desc="[build] proc", unit="row"):
         u, c, p = _user(row.user), _computer(row.computer), _process(row.process)
@@ -238,22 +275,92 @@ def build() -> None:
             _add(triples, c, "stops_process", p)
 
     print(f"[build] sorting and writing {len(triples):,} unique triples ...")
-    with TRIPLES_PATH.open("w") as f:
+    with triples_path.open("w") as f:
         for h, r, t in sorted(triples):
             f.write(f"{h}\t{r}\t{t}\n")
 
-    print(f"[build] Wrote {len(triples):,} triples to {TRIPLES_PATH}")
+    print(f"[build] Wrote {len(triples):,} triples to {triples_path}")
+
+    # MITRE ATT&CK knowledge base -> a second data model in the same graph.
+    if INCLUDE_MITRE_TRIPLES:
+        n = mitre.write_attack_triples(MITRE_TRIPLES_PATH)
+        print(f"[build] Wrote {n:,} MITRE ATT&CK triples to {MITRE_TRIPLES_PATH}")
 
 
 # --------------------------------------------------------------------------- #
-# Step 2: train the embedding model
+# Step 2: logical reasoning (Datalog over the knowledge graph)
+# --------------------------------------------------------------------------- #
+def reason() -> None:
+    """Run the symbolic reasoner (``reasoning.py``) on the built graph.
+
+    Encodes MITRE ATT&CK / cyber-kill-chain patterns as Datalog rules and uses
+    *full recursion* (lateral-movement transitive closure) plus *object
+    creation* (minting ``attack_chain`` entities) to discover unknown parts of
+    the graph (LO2/LO6). The outputs are:
+
+    * ``derived_triples.tsv`` – fed back into the embedding graph as logical
+      provenance (the hybrid link, LO2/LO12);
+    * ``flagged_entities.txt`` – the logical anomaly signal used by ``evaluate``;
+    * ``attack_chains.json`` – materialised chains shown in the dashboard.
+    """
+    GEN_DIR.mkdir(parents=True, exist_ok=True)
+    facts = reasoning.load_facts(TRIPLES_PATH)
+    print(f"[reason] loaded EDB relations: {sorted(facts)}")
+    derived = reasoning.run(facts, max_depth=MAX_CHAIN_DEPTH)
+
+    n_triples = reasoning.write_derived(DERIVED_TRIPLES_PATH, derived)
+    n_flagged = reasoning.write_flagged(FLAGGED_PATH, derived)
+    n_chains = reasoning.write_chains(CHAINS_PATH, derived)
+
+    summary = reasoning.summary(derived)
+    print(f"[reason] derived: {summary}")
+    print(f"[reason] Wrote {n_triples:,} derived triples to {DERIVED_TRIPLES_PATH}")
+    print(f"[reason] Wrote {n_flagged:,} flagged entities to {FLAGGED_PATH}")
+    print(f"[reason] Wrote {n_chains:,} attack chains to {CHAINS_PATH}")
+
+
+def _training_triple_files() -> list[Path]:
+    """Triple files combined for embedding training.
+
+    Always the log graph; optionally the MITRE ATT&CK triples and the
+    Datalog-derived triples (logical provenance), depending on the
+    ``INCLUDE_*`` switches and whether the files exist.
+    """
+    files = [TRIPLES_PATH]
+    if INCLUDE_MITRE_TRIPLES and MITRE_TRIPLES_PATH.exists():
+        files.append(MITRE_TRIPLES_PATH)
+    if INCLUDE_DERIVED_TRIPLES and DERIVED_TRIPLES_PATH.exists():
+        files.append(DERIVED_TRIPLES_PATH)
+    return files
+
+
+def _load_training_factory():
+    """Build one ``TriplesFactory`` from all configured triple sources."""
+    from pykeen.triples import TriplesFactory
+
+    files = _training_triple_files()
+    frames = []
+    for path in files:
+        frame = pd.read_csv(path, sep="\t", names=["h", "r", "t"], dtype=str)
+        frames.append(frame)
+        print(f"[train] + {len(frame):,} triples from {path.name}")
+    # ``drop_duplicates`` deduplicates without materialising a sorted copy of the
+    # whole array (cheaper than ``np.unique`` at KG scale).
+    combined = pd.concat(frames, ignore_index=True).drop_duplicates()
+    print(f"[train] combined {len(combined):,} unique triples from {len(files)} source(s)")
+    return TriplesFactory.from_labeled_triples(
+        combined.to_numpy(), create_inverse_triples=True
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Step 3: train the embedding model
 # --------------------------------------------------------------------------- #
 def train() -> None:
     """Train every configured PyKEEN model on the generated triples."""
     from pykeen.pipeline import pipeline as pykeen_pipeline
-    from pykeen.triples import TriplesFactory
 
-    tf = TriplesFactory.from_path(TRIPLES_PATH, create_inverse_triples=True)
+    tf = _load_training_factory()
     print(f"[train] {tf}")
 
     # Pick the device once and tune the workload to it: a GPU can chew through
@@ -318,17 +425,18 @@ def train() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Step 3: score red-team and normal triples
+# Step 4: score red-team and normal triples
 # --------------------------------------------------------------------------- #
 def score() -> None:
     """Score the red-team triples and a sample of normal triples per model."""
     import torch
     from pykeen.predict import predict_triples
-    from pykeen.triples import TriplesFactory
 
     GEN_DIR.mkdir(parents=True, exist_ok=True)
 
-    tf = TriplesFactory.from_path(TRIPLES_PATH, create_inverse_triples=True)
+    # Use the SAME combined factory the models were trained on so entity and
+    # relation ids line up with each saved model's embeddings.
+    tf = _load_training_factory()
 
     # --- red-team (malicious) triples (model-independent candidates) ---
     candidates = _redteam_candidate_triples()
@@ -367,34 +475,55 @@ def score() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Step 4: evaluate detection performance
+# Step 5: evaluate detection performance (KGE-only vs. hybrid)
 # --------------------------------------------------------------------------- #
 def evaluate() -> None:
-    """Compare red-team vs. normal score distributions for every model."""
-    from sklearn.metrics import average_precision_score, roc_auc_score
+    """Compare red-team vs. normal scores for every model, KGE-only and hybrid.
+
+    The hybrid detector adds the symbolic reasoner's logical signal (entities
+    implicated in a lateral-movement / attack chain) on top of the embedding
+    anomaly score, directly evidencing how symbolic and sub-symbolic methods
+    combine in a KG (LO2/LO12). The comparison table reports both so the report
+    can show whether the hybrid beats the pure-KGE baseline.
+    """
+    flagged = reasoning.load_flagged(FLAGGED_PATH)
+    if flagged:
+        print(f"[evaluate] loaded {len(flagged):,} flagged entities (logical signal)")
+    else:
+        print("[evaluate] no flagged entities found — run the 'reason' step to "
+              "enable the hybrid detector (falling back to KGE-only)")
 
     summary = []
     for model_name in MODELS:
         normal = pd.read_csv(_normal_scores_path(model_name))
         red = pd.read_csv(_redteam_scores_path(model_name))
-        normal["label"] = 0
-        red["label"] = 1
+        df = hybrid.labelled_frame(normal, red)
 
-        df = pd.concat([normal, red], ignore_index=True)
-        # PyKEEN score: higher = more plausible. Invert it for anomaly detection.
-        df["anomaly_score"] = -df["score"]
+        res = hybrid.evaluate_frame(df, flagged, lam=HYBRID_LAMBDA)
+        summary.append(
+            {
+                "model": model_name,
+                "kge_roc_auc": res["kge"]["roc_auc"],
+                "hybrid_roc_auc": res["hybrid"]["roc_auc"],
+                "roc_auc_delta": res["roc_auc_delta"],
+                "kge_avg_precision": res["kge"]["average_precision"],
+                "hybrid_avg_precision": res["hybrid"]["average_precision"],
+            }
+        )
 
-        auc = roc_auc_score(df["label"], df["anomaly_score"])
-        ap = average_precision_score(df["label"], df["anomaly_score"])
-        summary.append({"model": model_name, "roc_auc": auc, "average_precision": ap})
-
+        anomaly = hybrid.kge_anomaly(df)
         print(f"\n===== [evaluate] {model_name} =====")
-        print(f"[evaluate] ROC-AUC: {auc:.4f}")
-        print(f"[evaluate] Average precision: {ap:.4f}")
-        print("\n[evaluate] Normal anomaly scores:")
-        print(df[df["label"] == 0]["anomaly_score"].describe())
-        print("\n[evaluate] Red-team anomaly scores:")
-        print(df[df["label"] == 1]["anomaly_score"].describe())
+        print(f"[evaluate] KGE-only   ROC-AUC: {res['kge']['roc_auc']:.4f} | "
+              f"AP: {res['kge']['average_precision']:.4f}")
+        print(f"[evaluate] Hybrid     ROC-AUC: {res['hybrid']['roc_auc']:.4f} | "
+              f"AP: {res['hybrid']['average_precision']:.4f} "
+              f"(Δ ROC-AUC {res['roc_auc_delta']:+.4f})")
+        print(f"[evaluate] logical flag hits: {res['flagged_positive_rate']:.2%} of "
+              f"red-team vs {res['flagged_negative_rate']:.2%} of normal triples")
+        print("\n[evaluate] Normal KGE anomaly scores:")
+        print(pd.Series(anomaly[df["label"] == 0]).describe())
+        print("\n[evaluate] Red-team KGE anomaly scores:")
+        print(pd.Series(anomaly[df["label"] == 1]).describe())
 
         # Also surface the training metrics, if available.
         results_path = _model_dir(model_name) / "results.json"
@@ -404,17 +533,52 @@ def evaluate() -> None:
             print("\n[evaluate] Training metrics (excerpt):")
             print(json.dumps(metrics, indent=2)[:2000])
 
-    # Side-by-side comparison of all models.
-    comparison = pd.DataFrame(summary).sort_values("roc_auc", ascending=False)
-    print("\n===== [evaluate] model comparison =====")
+    # Side-by-side comparison of all models (ranked by the hybrid detector).
+    comparison = pd.DataFrame(summary).sort_values("hybrid_roc_auc", ascending=False)
+    print("\n===== [evaluate] model comparison (KGE-only vs hybrid) =====")
     print(comparison.to_string(index=False))
+
+
+# --------------------------------------------------------------------------- #
+# Optional step: demonstrate Knowledge Graph evolution (LO8)
+# --------------------------------------------------------------------------- #
+def evolve() -> None:
+    """Show the KG growing as new logs arrive, then re-detect on the larger graph.
+
+    Rebuilds the graph over a *later* time window (``EVOLVE_TIME`` instead of
+    ``MAX_TIME``), reports how many triples were added, re-runs the reasoner and
+    re-scores. This is the Knowledge-Graph-completion side of evolution (LO8):
+    new events extend the graph and link prediction / reasoning are re-applied.
+    """
+    base_count = _count_lines(TRIPLES_PATH) if TRIPLES_PATH.exists() else 0
+    print(f"[evolve] current graph: {base_count:,} triples (window <= {MAX_TIME}s)")
+
+    print(f"[evolve] rebuilding over the larger window <= {EVOLVE_TIME}s ...")
+    build(max_time=EVOLVE_TIME, triples_path=TRIPLES_PATH)
+    new_count = _count_lines(TRIPLES_PATH)
+    print(f"[evolve] graph grew by {new_count - base_count:,} triples "
+          f"({base_count:,} -> {new_count:,})")
+
+    print("[evolve] re-running the reasoner on the evolved graph ...")
+    reason()
+    print("[evolve] retraining / re-scoring on the evolved graph ...")
+    train()
+    score()
+    evaluate()
+
+
+def _count_lines(path: Path) -> int:
+    with Path(path).open() as f:
+        return sum(1 for _ in f)
 
 
 STEP_FUNCS = {
     "build": build,
+    "reason": reason,
     "train": train,
     "score": score,
     "evaluate": evaluate,
+    "evolve": evolve,
 }
 
 
@@ -429,9 +593,11 @@ def main() -> None:
     parser.add_argument(
         "--steps",
         nargs="+",
-        choices=ALL_STEPS,
+        choices=list(ALL_STEPS) + ["evolve"],
         default=list(ALL_STEPS),
-        help="Subset of steps to run, in order.",
+        help="Subset of steps to run, in order. The default runs build → reason "
+             "→ train → score → evaluate. 'evolve' (LO8) is opt-in and rebuilds "
+             "the graph over a larger time window before re-detecting.",
     )
     args = parser.parse_args()
 
