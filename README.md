@@ -44,7 +44,8 @@ python pipeline.py
 
 That single command runs the whole project end to end and prints the detection
 metrics (ROC-AUC, average precision and the score distributions). All artifacts
-are written to `generated-files/` and the trained model to `pykeen-lanl-model/`.
+are written to `generated-files/` and the trained models to
+`pykeen-lanl-model/<model>/`.
 
 While it runs you'll see live progress: each step is announced with a
 `[i/n] step` header and a timing summary, the build step prints `tqdm` progress
@@ -59,14 +60,17 @@ training progress bars.
    knowledge-graph triples (`generated-files/triples.tsv`). By default only the
    first day of events is used to keep the graph small (see `MAX_TIME` in
    `pipeline.py`).
-2. **train** – trains a PyKEEN embedding model (`TransE` by default) on the
-   triples and saves it to `pykeen-lanl-model/`.
+2. **train** – trains the configured PyKEEN embedding models (`TransE` and
+   `DistMult` by default) on the triples and saves each one to
+   `pykeen-lanl-model/<model>/`.
 3. **score** – scores the red-team triples and a random sample of normal
-   triples, writing `generated-files/redteam_scores.csv` and
-   `generated-files/normal_scores.csv`.
-4. **evaluate** – treats the model score as an anomaly score (lower plausibility
-   = more anomalous) and reports ROC-AUC, average precision and per-class score
-   statistics.
+   triples with every trained model, writing
+   `generated-files/redteam_scores_<model>.csv` and
+   `generated-files/normal_scores_<model>.csv`.
+4. **evaluate** – treats each model score as an anomaly score (lower
+   plausibility = more anomalous), reports ROC-AUC, average precision and
+   per-class score statistics per model, and prints a side-by-side comparison
+   table ranking the models.
 
 ### Running individual steps
 
@@ -82,6 +86,24 @@ python pipeline.py --steps score evaluate
 See all options with `python pipeline.py --help`. Model and graph settings
 (embedding dimension, epochs, sample size, time window, ...) live as constants
 at the top of `pipeline.py`.
+
+### Choosing which models to train
+
+The `train`/`score`/`evaluate` steps run over every model listed in the
+`MODELS` constant at the top of `pipeline.py`:
+
+```python
+MODELS = ["TransE", "DistMult"]
+```
+
+Add or remove any model name from
+[PyKEEN's model registry](https://pykeen.readthedocs.io/en/stable/reference/models.html)
+(e.g. `"ComplEx"`, `"RotatE"`, `"TransH"`) and each will be trained, scored and
+evaluated independently. The `evaluate` step prints a side-by-side comparison
+table ranking the models by ROC-AUC. Every model uses `embedding_dim`
+(`EMBEDDING_DIM`); to pass extra/override hyper-parameters to a specific model,
+add an entry to the `MODEL_KWARGS` dict, e.g.
+`MODEL_KWARGS = {"RotatE": {"embedding_dim": 128}}`.
 
 ### Keeping the run time reasonable
 

@@ -7,12 +7,12 @@ Run the whole project with a single command:
 This performs, in order:
 
     1. build   - turn the raw LANL logs into knowledge-graph triples
-    2. train   - train a PyKEEN embedding model on those triples
+    2. train   - train one or more PyKEEN embedding models on those triples
     3. score   - score the red-team (malicious) and a sample of normal triples
     4. evaluate- compare the two score distributions (ROC-AUC, AP, ...)
 
-Each step writes its artifacts to ``generated-files/`` (and the trained model to
-``pykeen-lanl-model/``) so steps can also be run individually, e.g.::
+Each step writes its artifacts to ``generated-files/`` (and each trained model to
+``pykeen-lanl-model/<model>/``) so steps can also be run individually, e.g.::
 
     python pipeline.py --steps train score evaluate
 
@@ -42,15 +42,24 @@ GEN_DIR = Path("generated-files")
 MODEL_DIR = Path("pykeen-lanl-model")
 
 TRIPLES_PATH = GEN_DIR / "triples.tsv"
-REDTEAM_SCORES_PATH = GEN_DIR / "redteam_scores.csv"
-NORMAL_SCORES_PATH = GEN_DIR / "normal_scores.csv"
 
 # Only keep the first day of events to keep the graph small. Set to ``None`` to
 # use every event in the dataset.
 MAX_TIME = 24 * 60 * 60
 
 # Training hyper-parameters.
-MODEL_NAME = "TransE"
+#
+# ``MODELS`` lists every PyKEEN model to train and evaluate. Any model name from
+# PyKEEN's registry works (e.g. "TransE", "DistMult", "ComplEx", "RotatE", ...).
+# Each model is trained independently and the ``evaluate`` step prints a
+# side-by-side comparison of their anomaly-detection metrics.
+MODELS = ["TransE", "DistMult"]
+
+# Optional per-model keyword arguments passed to PyKEEN's ``model_kwargs``. Every
+# model gets ``embedding_dim=EMBEDDING_DIM`` by default; add an entry here only
+# to override or extend that for a specific model.
+MODEL_KWARGS: dict = {}
+
 EMBEDDING_DIM = 64
 EPOCHS = 5
 BATCH_SIZE = 1024
@@ -73,6 +82,19 @@ ALL_STEPS = ("build", "train", "score", "evaluate")
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+def _model_dir(model_name: str) -> Path:
+    """Directory where a given model's PyKEEN artifacts are stored."""
+    return MODEL_DIR / model_name
+
+
+def _redteam_scores_path(model_name: str) -> Path:
+    return GEN_DIR / f"redteam_scores_{model_name}.csv"
+
+
+def _normal_scores_path(model_name: str) -> Path:
+    return GEN_DIR / f"normal_scores_{model_name}.csv"
+
+
 def _clean(x):
     """Normalise a raw cell value, mapping missing/``?`` values to ``None``."""
     if pd.isna(x):
@@ -208,7 +230,7 @@ def build() -> None:
 # Step 2: train the embedding model
 # --------------------------------------------------------------------------- #
 def train() -> None:
-    """Train a PyKEEN model on the generated triples."""
+    """Train every configured PyKEEN model on the generated triples."""
     from pykeen.pipeline import pipeline as pykeen_pipeline
     from pykeen.triples import TriplesFactory
 
@@ -232,38 +254,39 @@ def train() -> None:
             f"of {testing.num_triples:,} test triples"
         )
 
-    result = pykeen_pipeline(
-        training=training,
-        testing=eval_factory,
-        model=MODEL_NAME,
-        epochs=EPOCHS,
-        model_kwargs=dict(embedding_dim=EMBEDDING_DIM),
-        training_kwargs=dict(batch_size=BATCH_SIZE),
-        evaluation_kwargs=dict(batch_size=EVAL_BATCH_SIZE),
-    )
-    result.save_to_directory(str(MODEL_DIR))
-    print(f"[train] Saved model to {MODEL_DIR}")
+    for i, model_name in enumerate(MODELS, start=1):
+        print(f"\n[train] ({i}/{len(MODELS)}) training {model_name} ...")
+        model_kwargs = dict(embedding_dim=EMBEDDING_DIM)
+        model_kwargs.update(MODEL_KWARGS.get(model_name, {}))
+
+        result = pykeen_pipeline(
+            training=training,
+            testing=eval_factory,
+            model=model_name,
+            epochs=EPOCHS,
+            model_kwargs=model_kwargs,
+            training_kwargs=dict(batch_size=BATCH_SIZE),
+            evaluation_kwargs=dict(batch_size=EVAL_BATCH_SIZE),
+        )
+        out_dir = _model_dir(model_name)
+        result.save_to_directory(str(out_dir))
+        print(f"[train] Saved {model_name} model to {out_dir}")
 
 
 # --------------------------------------------------------------------------- #
 # Step 3: score red-team and normal triples
 # --------------------------------------------------------------------------- #
 def score() -> None:
-    """Score the red-team triples and a sample of normal triples."""
+    """Score the red-team triples and a sample of normal triples per model."""
     import torch
     from pykeen.predict import predict_triples
     from pykeen.triples import TriplesFactory
 
     GEN_DIR.mkdir(parents=True, exist_ok=True)
 
-    model = torch.load(
-        MODEL_DIR / "trained_model.pkl",
-        map_location="cpu",
-        weights_only=False,
-    )
     tf = TriplesFactory.from_path(TRIPLES_PATH, create_inverse_triples=True)
 
-    # --- red-team (malicious) triples ---
+    # --- red-team (malicious) triples (model-independent candidates) ---
     candidates = _redteam_candidate_triples()
     known = [
         (h, r, t)
@@ -274,52 +297,73 @@ def score() -> None:
         f"[score] red-team candidates: {len(candidates):,} | "
         f"scorable: {len(known):,} | unknown: {len(candidates) - len(known):,}"
     )
-    red_df = predict_triples(model=model, triples=known, triples_factory=tf).process(factory=tf).df
-    red_df.to_csv(REDTEAM_SCORES_PATH, index=False)
-    print(f"[score] Saved {REDTEAM_SCORES_PATH}")
 
-    # --- normal (benign) triples ---
+    # --- normal (benign) triples (same sample reused across models) ---
     normal = pd.read_csv(TRIPLES_PATH, sep="\t", names=["head", "relation", "tail"])
     sample = normal.sample(n=min(NORMAL_SAMPLE_SIZE, len(normal)), random_state=RANDOM_STATE)
-    triples = list(sample.itertuples(index=False, name=None))
-    normal_df = predict_triples(model=model, triples=triples, triples_factory=tf).process(factory=tf).df
-    normal_df.to_csv(NORMAL_SCORES_PATH, index=False)
-    print(f"[score] Saved {NORMAL_SCORES_PATH}")
+    normal_triples = list(sample.itertuples(index=False, name=None))
+
+    for i, model_name in enumerate(MODELS, start=1):
+        print(f"\n[score] ({i}/{len(MODELS)}) scoring with {model_name} ...")
+        model = torch.load(
+            _model_dir(model_name) / "trained_model.pkl",
+            map_location="cpu",
+            weights_only=False,
+        )
+
+        red_df = predict_triples(model=model, triples=known, triples_factory=tf).process(factory=tf).df
+        red_path = _redteam_scores_path(model_name)
+        red_df.to_csv(red_path, index=False)
+        print(f"[score] Saved {red_path}")
+
+        normal_df = predict_triples(model=model, triples=normal_triples, triples_factory=tf).process(factory=tf).df
+        normal_path = _normal_scores_path(model_name)
+        normal_df.to_csv(normal_path, index=False)
+        print(f"[score] Saved {normal_path}")
 
 
 # --------------------------------------------------------------------------- #
 # Step 4: evaluate detection performance
 # --------------------------------------------------------------------------- #
 def evaluate() -> None:
-    """Compare red-team vs. normal score distributions."""
+    """Compare red-team vs. normal score distributions for every model."""
     from sklearn.metrics import average_precision_score, roc_auc_score
 
-    normal = pd.read_csv(NORMAL_SCORES_PATH)
-    red = pd.read_csv(REDTEAM_SCORES_PATH)
-    normal["label"] = 0
-    red["label"] = 1
+    summary = []
+    for model_name in MODELS:
+        normal = pd.read_csv(_normal_scores_path(model_name))
+        red = pd.read_csv(_redteam_scores_path(model_name))
+        normal["label"] = 0
+        red["label"] = 1
 
-    df = pd.concat([normal, red], ignore_index=True)
-    # PyKEEN score: higher = more plausible. Invert it for anomaly detection.
-    df["anomaly_score"] = -df["score"]
+        df = pd.concat([normal, red], ignore_index=True)
+        # PyKEEN score: higher = more plausible. Invert it for anomaly detection.
+        df["anomaly_score"] = -df["score"]
 
-    auc = roc_auc_score(df["label"], df["anomaly_score"])
-    ap = average_precision_score(df["label"], df["anomaly_score"])
+        auc = roc_auc_score(df["label"], df["anomaly_score"])
+        ap = average_precision_score(df["label"], df["anomaly_score"])
+        summary.append({"model": model_name, "roc_auc": auc, "average_precision": ap})
 
-    print(f"[evaluate] ROC-AUC: {auc:.4f}")
-    print(f"[evaluate] Average precision: {ap:.4f}")
-    print("\n[evaluate] Normal anomaly scores:")
-    print(df[df["label"] == 0]["anomaly_score"].describe())
-    print("\n[evaluate] Red-team anomaly scores:")
-    print(df[df["label"] == 1]["anomaly_score"].describe())
+        print(f"\n===== [evaluate] {model_name} =====")
+        print(f"[evaluate] ROC-AUC: {auc:.4f}")
+        print(f"[evaluate] Average precision: {ap:.4f}")
+        print("\n[evaluate] Normal anomaly scores:")
+        print(df[df["label"] == 0]["anomaly_score"].describe())
+        print("\n[evaluate] Red-team anomaly scores:")
+        print(df[df["label"] == 1]["anomaly_score"].describe())
 
-    # Also surface the training metrics, if available.
-    results_path = MODEL_DIR / "results.json"
-    if results_path.exists():
-        with results_path.open() as f:
-            metrics = json.load(f).get("metric_results", {})
-        print("\n[evaluate] Training metrics (excerpt):")
-        print(json.dumps(metrics, indent=2)[:2000])
+        # Also surface the training metrics, if available.
+        results_path = _model_dir(model_name) / "results.json"
+        if results_path.exists():
+            with results_path.open() as f:
+                metrics = json.load(f).get("metric_results", {})
+            print("\n[evaluate] Training metrics (excerpt):")
+            print(json.dumps(metrics, indent=2)[:2000])
+
+    # Side-by-side comparison of all models.
+    comparison = pd.DataFrame(summary).sort_values("roc_auc", ascending=False)
+    print("\n===== [evaluate] model comparison =====")
+    print(comparison.to_string(index=False))
 
 
 STEP_FUNCS = {
