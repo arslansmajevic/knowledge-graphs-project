@@ -62,16 +62,28 @@ MODEL_KWARGS: dict = {}
 
 EMBEDDING_DIM = 64
 EPOCHS = 5
-BATCH_SIZE = 1024
 RANDOM_STATE = 42
+
+# Training batch size. Larger batches keep the GPU busier and train faster, but
+# GPUs handle big batches far better than CPUs, so the device-appropriate value
+# is chosen automatically at run time (see ``train``). On a CPU a smaller batch
+# avoids thrashing; on a GPU a large batch maximises utilisation.
+CPU_BATCH_SIZE = 1024
+GPU_BATCH_SIZE = 8192
+
+# DataLoader workers used to feed the model during training. Extra workers
+# overlap batch preparation with GPU compute so the GPU does not sit idle
+# waiting for data; on CPU keep this at 0 to avoid process-spawn overhead.
+GPU_NUM_WORKERS = 2
 
 # Evaluation speed/accuracy trade-off. Ranking every test triple against all
 # ~110k entities on CPU takes many hours, so by default we evaluate on a random
 # subsample of the held-out test triples. Set ``EVAL_SAMPLE_SIZE = None`` to
-# evaluate on the full test split. ``EVAL_BATCH_SIZE`` avoids PyKEEN's very
-# conservative automatic batch size (32) on CPU.
+# evaluate on the full test split. The eval batch size also adapts to the device
+# (a GPU can score far more triples at once than a CPU).
 EVAL_SAMPLE_SIZE = 10_000
-EVAL_BATCH_SIZE = 256
+CPU_EVAL_BATCH_SIZE = 256
+GPU_EVAL_BATCH_SIZE = 4096
 
 # Number of normal triples sampled as the "benign" class when evaluating.
 NORMAL_SAMPLE_SIZE = 10_000
@@ -85,6 +97,13 @@ ALL_STEPS = ("build", "train", "score", "evaluate")
 def _model_dir(model_name: str) -> Path:
     """Directory where a given model's PyKEEN artifacts are stored."""
     return MODEL_DIR / model_name
+
+
+def _select_device():
+    """Return the best available torch device ("cuda" if a GPU is present)."""
+    import torch
+
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def _redteam_scores_path(model_name: str) -> Path:
@@ -237,6 +256,25 @@ def train() -> None:
     tf = TriplesFactory.from_path(TRIPLES_PATH, create_inverse_triples=True)
     print(f"[train] {tf}")
 
+    # Pick the device once and tune the workload to it: a GPU can chew through
+    # much larger batches than a CPU, so use bigger batches and overlap data
+    # loading with compute to keep the GPU busy instead of idling on I/O.
+    device = _select_device()
+    on_gpu = device == "cuda"
+    batch_size = GPU_BATCH_SIZE if on_gpu else CPU_BATCH_SIZE
+    eval_batch_size = GPU_EVAL_BATCH_SIZE if on_gpu else CPU_EVAL_BATCH_SIZE
+    num_workers = GPU_NUM_WORKERS if on_gpu else 0
+    if on_gpu:
+        import torch
+
+        print(f"[train] using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        print("[train] no GPU detected, training on CPU")
+    print(
+        f"[train] device={device} batch_size={batch_size:,} "
+        f"eval_batch_size={eval_batch_size:,} num_workers={num_workers}"
+    )
+
     training, testing = tf.split([0.8, 0.2], random_state=RANDOM_STATE)
 
     # Evaluating every held-out triple against all entities is the slow part of
@@ -254,6 +292,11 @@ def train() -> None:
             f"of {testing.num_triples:,} test triples"
         )
 
+    # Overlap host-to-device transfers with compute when a GPU is available.
+    training_kwargs = dict(batch_size=batch_size, num_workers=num_workers)
+    if on_gpu:
+        training_kwargs["pin_memory"] = True
+
     for i, model_name in enumerate(MODELS, start=1):
         print(f"\n[train] ({i}/{len(MODELS)}) training {model_name} ...")
         model_kwargs = dict(embedding_dim=EMBEDDING_DIM)
@@ -264,9 +307,10 @@ def train() -> None:
             testing=eval_factory,
             model=model_name,
             epochs=EPOCHS,
+            device=device,
             model_kwargs=model_kwargs,
-            training_kwargs=dict(batch_size=BATCH_SIZE),
-            evaluation_kwargs=dict(batch_size=EVAL_BATCH_SIZE),
+            training_kwargs=training_kwargs,
+            evaluation_kwargs=dict(batch_size=eval_batch_size),
         )
         out_dir = _model_dir(model_name)
         result.save_to_directory(str(out_dir))

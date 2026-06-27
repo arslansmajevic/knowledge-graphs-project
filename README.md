@@ -135,9 +135,29 @@ of `pipeline.py`:
   full test split. `EVAL_SAMPLE_SIZE` (default `10_000`) evaluates on a random
   subsample instead, finishing in seconds while still giving a meaningful
   quality estimate; set it to `None` to evaluate on the full split.
-  `EVAL_BATCH_SIZE` avoids PyKEEN's very conservative automatic CPU batch size.
+  The eval batch size avoids PyKEEN's very conservative automatic CPU batch size.
 
 The trained model is unaffected by `EVAL_SAMPLE_SIZE` — it only changes how many
 triples are used to *measure* quality, so the downstream `score`/`evaluate`
 steps still use the full model.
+
+### GPU acceleration
+
+The `train` step auto-detects CUDA and, when a GPU is present, uses it
+automatically — no flags required. It also prints the selected device and tunes
+the workload to it:
+
+- **Device** – the model and PyKEEN pipeline run on `cuda` when a GPU is
+  available, otherwise on `cpu`.
+- **Batch size** – GPUs handle far larger batches than CPUs, so training and
+  evaluation use bigger batches on a GPU (`GPU_BATCH_SIZE` / `GPU_EVAL_BATCH_SIZE`)
+  and smaller ones on a CPU (`CPU_BATCH_SIZE` / `CPU_EVAL_BATCH_SIZE`). Larger
+  batches keep the GPU busy and train faster; raise `GPU_BATCH_SIZE` further if
+  your GPU has spare memory, or lower it if you hit out-of-memory errors.
+- **Data loading** – on a GPU, `GPU_NUM_WORKERS` DataLoader workers plus pinned
+  memory overlap batch preparation with compute so the GPU does not idle waiting
+  for data.
+
+All of these are constants at the top of `pipeline.py`. To run the whole thing
+on a free GPU, see [Run it faster on a free GPU (Google Colab)](#run-it-faster-on-a-free-gpu-google-colab).
 
