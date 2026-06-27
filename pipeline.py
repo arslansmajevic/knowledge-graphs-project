@@ -53,7 +53,7 @@ MAX_TIME = 24 * 60 * 60
 # PyKEEN's registry works (e.g. "TransE", "DistMult", "ComplEx", "RotatE", ...).
 # Each model is trained independently and the ``evaluate`` step prints a
 # side-by-side comparison of their anomaly-detection metrics.
-MODELS = ["TransE", "DistMult"]
+MODELS = ["TransE", "DistMult", "RotatE", "ComplEx"]
 
 # Optional per-model keyword arguments passed to PyKEEN's ``model_kwargs``. Every
 # model gets ``embedding_dim=EMBEDDING_DIM`` by default; add an entry here only
@@ -86,7 +86,7 @@ CPU_EVAL_BATCH_SIZE = 256
 GPU_EVAL_BATCH_SIZE = 4096
 
 # Number of normal triples sampled as the "benign" class when evaluating.
-NORMAL_SAMPLE_SIZE = 10_000
+NORMAL_SAMPLE_SIZE = 100_000
 
 ALL_STEPS = ("build", "train", "score", "evaluate")
 
