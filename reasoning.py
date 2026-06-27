@@ -32,7 +32,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Union
 
 # --------------------------------------------------------------------------- #
 # A tiny Datalog engine
@@ -68,7 +68,7 @@ class Skolem:
         return f"{self.functor}(" + "|".join(vals) + ")"
 
 
-Term = object  # Var | Skolem | str (kept loose on purpose)
+Term = Union[Var, Skolem, str]  # a constant, a logic variable, or a function term
 Atom = tuple  # (predicate: str, terms: tuple[Term, ...])
 
 
@@ -133,7 +133,9 @@ def _match_atom(atom: Atom, binding: dict, facts: Facts, index: dict) -> Iterato
             yield new_binding
 
 
-def _unify(terms: tuple, row: tuple, binding: dict) -> dict | None:
+def _unify(
+    terms: tuple, row: tuple, binding: dict[str, str]
+) -> dict[str, str] | None:
     if len(terms) != len(row):
         return None
     out = binding

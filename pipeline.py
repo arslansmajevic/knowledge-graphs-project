@@ -336,19 +336,20 @@ def _training_triple_files() -> list[Path]:
 
 def _load_training_factory():
     """Build one ``TriplesFactory`` from all configured triple sources."""
-    import numpy as np
     from pykeen.triples import TriplesFactory
 
     files = _training_triple_files()
-    arrays = []
+    frames = []
     for path in files:
-        arr = pd.read_csv(path, sep="\t", names=["h", "r", "t"], dtype=str).to_numpy()
-        arrays.append(arr)
-        print(f"[train] + {len(arr):,} triples from {path.name}")
-    triples = np.unique(np.vstack(arrays), axis=0)
-    print(f"[train] combined {len(triples):,} unique triples from {len(files)} source(s)")
+        frame = pd.read_csv(path, sep="\t", names=["h", "r", "t"], dtype=str)
+        frames.append(frame)
+        print(f"[train] + {len(frame):,} triples from {path.name}")
+    # ``drop_duplicates`` deduplicates without materialising a sorted copy of the
+    # whole array (cheaper than ``np.unique`` at KG scale).
+    combined = pd.concat(frames, ignore_index=True).drop_duplicates()
+    print(f"[train] combined {len(combined):,} unique triples from {len(files)} source(s)")
     return TriplesFactory.from_labeled_triples(
-        triples, create_inverse_triples=True
+        combined.to_numpy(), create_inverse_triples=True
     )
 
 

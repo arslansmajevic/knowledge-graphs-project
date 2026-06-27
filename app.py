@@ -159,7 +159,7 @@ def chains_panel() -> None:
     )
 
     query = st.text_input(
-        "Show attack chains involving entity (e.g. `computer:C123` or `user:U45@DOM`)",
+        "Show attack chains involving entity (e.g. `computer:C123` or `user:U45@DOM1`)",
         "",
     ).strip()
     shown = [c for c in chains if not query or query in c["members"]]

@@ -36,10 +36,11 @@ def logic_flags(df: pd.DataFrame, flagged: set[str]) -> np.ndarray:
 def zscore(values: np.ndarray) -> np.ndarray:
     """Standardise to zero mean / unit variance (constant arrays -> zeros)."""
     values = np.asarray(values, dtype=float)
+    mean = values.mean()
     std = values.std()
     if std == 0:
         return np.zeros_like(values)
-    return (values - values.mean()) / std
+    return (values - mean) / std
 
 
 def kge_anomaly(df: pd.DataFrame) -> np.ndarray:
