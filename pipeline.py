@@ -23,9 +23,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
 
 import pandas as pd
+
+try:
+    from tqdm import tqdm
+except ImportError:  # tqdm is optional; fall back to a no-op wrapper.
+    def tqdm(iterable=None, **_kwargs):
+        return iterable if iterable is not None else []
 
 # --------------------------------------------------------------------------- #
 # Configuration
@@ -95,6 +102,7 @@ def _read_csv(name, columns):
     df = pd.read_csv(DATA_DIR / name, names=columns, compression="infer")
     if MAX_TIME is not None:
         df = df[df["time"] <= MAX_TIME]
+    print(f"[build]   read {name}: {len(df):,} rows")
     return df
 
 
@@ -107,7 +115,8 @@ def _redteam_candidate_triples():
     )
 
     triples = []
-    for row in red.itertuples(index=False):
+    for row in tqdm(red.itertuples(index=False), total=len(red),
+                    desc="[score] redteam", unit="row"):
         u = f"user:{row.user}"
         sc = f"computer:{row.src_computer}"
         dc = f"computer:{row.dst_computer}"
@@ -133,7 +142,8 @@ def build() -> None:
             "auth_type", "logon_type", "orientation", "result",
         ],
     )
-    for row in auth.itertuples(index=False):
+    for row in tqdm(auth.itertuples(index=False), total=len(auth),
+                    desc="[build] auth", unit="row"):
         su, du = _user(row.src_user), _user(row.dst_user)
         sc, dc = _computer(row.src_computer), _computer(row.dst_computer)
         if _clean(row.orientation) == "LogOn" and _clean(row.result) == "Success":
@@ -144,7 +154,8 @@ def build() -> None:
 
     # dns.txt: DNS lookups
     dns = _read_csv("dns.txt", ["time", "src_computer", "resolved_computer"])
-    for row in dns.itertuples(index=False):
+    for row in tqdm(dns.itertuples(index=False), total=len(dns),
+                    desc="[build] dns", unit="row"):
         _add(triples, _computer(row.src_computer), "dns_resolves",
              _computer(row.resolved_computer))
 
@@ -156,7 +167,8 @@ def build() -> None:
             "dst_port", "protocol", "packet_count", "byte_count",
         ],
     )
-    for row in flows.itertuples(index=False):
+    for row in tqdm(flows.itertuples(index=False), total=len(flows),
+                    desc="[build] flows", unit="row"):
         sc, dc = _computer(row.src_computer), _computer(row.dst_computer)
         _add(triples, sc, "flows_to", dc)
         _add(triples, sc, "uses_src_port", _port(row.src_port))
@@ -164,7 +176,8 @@ def build() -> None:
 
     # proc.txt: process start/stop events
     proc = _read_csv("proc.txt", ["time", "user", "computer", "process", "action"])
-    for row in proc.itertuples(index=False):
+    for row in tqdm(proc.itertuples(index=False), total=len(proc),
+                    desc="[build] proc", unit="row"):
         u, c, p = _user(row.user), _computer(row.computer), _process(row.process)
         action = _clean(row.action)
         if action == "Start":
@@ -175,6 +188,7 @@ def build() -> None:
             _add(triples, u, "ends_process", p)
             _add(triples, c, "stops_process", p)
 
+    print(f"[build] sorting and writing {len(triples):,} unique triples ...")
     with TRIPLES_PATH.open("w") as f:
         for h, r, t in sorted(triples):
             f.write(f"{h}\t{r}\t{t}\n")
@@ -308,9 +322,13 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    for step in args.steps:
-        print(f"\n===== {step} =====")
+    overall_start = time.perf_counter()
+    for i, step in enumerate(args.steps, start=1):
+        print(f"\n===== [{i}/{len(args.steps)}] {step} =====")
+        step_start = time.perf_counter()
         STEP_FUNCS[step]()
+        print(f"===== {step} done in {time.perf_counter() - step_start:.1f}s =====")
+    print(f"\nPipeline finished in {time.perf_counter() - overall_start:.1f}s")
 
 
 if __name__ == "__main__":

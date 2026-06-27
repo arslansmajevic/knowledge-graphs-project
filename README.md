@@ -46,6 +46,11 @@ That single command runs the whole project end to end and prints the detection
 metrics (ROC-AUC, average precision and the score distributions). All artifacts
 are written to `generated-files/` and the trained model to `pykeen-lanl-model/`.
 
+While it runs you'll see live progress: each step is announced with a
+`[i/n] step` header and a timing summary, the build step prints `tqdm` progress
+bars for each input file (auth/dns/flows/proc), and PyKEEN shows its own
+training progress bars.
+
 ### What the pipeline does
 
 `pipeline.py` runs four steps in order:
