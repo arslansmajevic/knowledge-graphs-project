@@ -1,3 +1,6 @@
 pykeen
+scikit-learn
+pandas
 matplotlib
 streamlit
+tqdm
