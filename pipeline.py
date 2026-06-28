@@ -81,28 +81,41 @@ EVOLVE_TIME = 2 * 24 * 60 * 60
 # PyKEEN's registry works (e.g. "TransE", "DistMult", "ComplEx", "RotatE", ...).
 # Each model is trained independently and the ``evaluate`` step prints a
 # side-by-side comparison of their anomaly-detection metrics.
-MODELS = ["TransE", "DistMult", "RotatE", "ComplEx"]
+#
+# Optimised for the A100 GPU on Colab: rather than spreading a small budget over
+# four models, we focus the whole GPU on a single strong model. RotatE's
+# rotational embeddings are expressive enough to give significant detection
+# results, and training only one model means we can afford a much larger
+# embedding dimension and many more epochs (below) within the same wall-clock
+# time. Add more names back to this list to compare several models again.
+MODELS = ["RotatE"]
 
 # Optional per-model keyword arguments passed to PyKEEN's ``model_kwargs``. Every
 # model gets ``embedding_dim=EMBEDDING_DIM`` by default; add an entry here only
 # to override or extend that for a specific model.
 MODEL_KWARGS: dict = {}
 
-EMBEDDING_DIM = 64
-EPOCHS = 5
+# A100-sized capacity. A larger embedding dimension and more epochs are what turn
+# a quick smoke-test run into one with significant detection quality; the A100
+# trains the single, focused model fast enough to absorb both. Lower these if you
+# run on a smaller GPU (or set MODELS back to several models) to stay in budget.
+EMBEDDING_DIM = 256
+EPOCHS = 100
 RANDOM_STATE = 42
 
 # Training batch size. Larger batches keep the GPU busier and train faster, but
 # GPUs handle big batches far better than CPUs, so the device-appropriate value
 # is chosen automatically at run time (see ``train``). On a CPU a smaller batch
-# avoids thrashing; on a GPU a large batch maximises utilisation.
+# avoids thrashing; on a GPU a large batch maximises utilisation. The GPU value
+# is sized for an A100 (40/80 GB); lower it if a smaller GPU hits out-of-memory.
 CPU_BATCH_SIZE = 1024
-GPU_BATCH_SIZE = 8192
+GPU_BATCH_SIZE = 16384
 
 # DataLoader workers used to feed the model during training. Extra workers
 # overlap batch preparation with GPU compute so the GPU does not sit idle
-# waiting for data; on CPU keep this at 0 to avoid process-spawn overhead.
-GPU_NUM_WORKERS = 2
+# waiting for data; on CPU keep this at 0 to avoid process-spawn overhead. Colab
+# A100 runtimes have plenty of host CPUs, so use a few workers.
+GPU_NUM_WORKERS = 4
 
 # Evaluation speed/accuracy trade-off. Ranking every test triple against all
 # ~110k entities on CPU takes many hours, so by default we evaluate on a random
@@ -111,7 +124,7 @@ GPU_NUM_WORKERS = 2
 # (a GPU can score far more triples at once than a CPU).
 EVAL_SAMPLE_SIZE = 10_000
 CPU_EVAL_BATCH_SIZE = 256
-GPU_EVAL_BATCH_SIZE = 4096
+GPU_EVAL_BATCH_SIZE = 8192
 
 # Number of normal triples sampled as the "benign" class when evaluating.
 NORMAL_SAMPLE_SIZE = 100_000
@@ -132,6 +145,28 @@ def _select_device():
     import torch
 
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _tune_gpu_backend() -> None:
+    """Enable Ampere/A100 tensor-core math for faster float32 work.
+
+    The A100 (Ampere) exposes TF32 tensor cores that accelerate float32 matrix
+    multiplications by a large factor with negligible accuracy impact. Recent
+    PyTorch ships with TF32 disabled by default, so we opt in explicitly. This is
+    a no-op on hardware without TF32 support, so it is always safe to call before
+    any GPU compute (training and scoring)."""
+    import torch
+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    # cuDNN autotuning picks the fastest kernels for the (here, fixed) batch
+    # shapes after a short warm-up.
+    torch.backends.cudnn.benchmark = True
+    try:
+        # PyTorch >= 1.12: route float32 matmuls through TF32 tensor cores.
+        torch.set_float32_matmul_precision("high")
+    except (AttributeError, ValueError):
+        pass
 
 
 def _redteam_scores_path(model_name: str) -> Path:
@@ -380,7 +415,9 @@ def train() -> None:
     if on_gpu:
         import torch
 
+        _tune_gpu_backend()
         print(f"[train] using GPU: {torch.cuda.get_device_name(0)}")
+        print("[train] enabled TF32 tensor-core math (Ampere/A100)")
     else:
         print("[train] no GPU detected, training on CPU")
     print(
@@ -440,6 +477,16 @@ def score() -> None:
 
     GEN_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Score on the GPU too when one is available: scoring ~100k normal triples is
+    # far faster on an A100 than on the CPU. Loading each model straight onto the
+    # selected device avoids a needless host round-trip.
+    device = _select_device()
+    if device == "cuda":
+        _tune_gpu_backend()
+        print(f"[score] using GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        print("[score] no GPU detected, scoring on CPU")
+
     # Use the SAME combined factory the models were trained on so entity and
     # relation ids line up with each saved model's embeddings.
     tf = _load_training_factory()
@@ -465,7 +512,7 @@ def score() -> None:
         print(f"\n[score] ({i}/{len(MODELS)}) scoring with {model_name} ...")
         model = torch.load(
             _model_dir(model_name) / "trained_model.pkl",
-            map_location="cpu",
+            map_location=device,
             weights_only=False,
         )
 

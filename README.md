@@ -161,10 +161,11 @@ hybrid weight, ...) live as constants at the top of `pipeline.py`.
 ### Choosing which models to train
 
 The `train`/`score`/`evaluate` steps run over every model listed in the
-`MODELS` constant at the top of `pipeline.py`:
+`MODELS` constant at the top of `pipeline.py`. By default this is a single,
+GPU-focused model:
 
 ```python
-MODELS = ["TransE", "DistMult", "RotatE", "ComplEx"]
+MODELS = ["RotatE"]
 ```
 
 Add or remove any model name from
@@ -196,20 +197,32 @@ steps still use the full model.
 
 ### GPU acceleration
 
-The `train` step auto-detects CUDA and, when a GPU is present, uses it
-automatically — no flags required. It also prints the selected device and tunes
-the workload to it:
+The `train` and `score` steps auto-detect CUDA and, when a GPU is present, use
+it automatically — no flags required. They also print the selected device and
+tune the workload to it:
 
-- **Device** – the model and PyKEEN pipeline run on `cuda` when a GPU is
+- **Device** – the model, training and scoring run on `cuda` when a GPU is
   available, otherwise on `cpu`.
+- **Tensor cores (A100/Ampere)** – on a CUDA GPU the pipeline enables TF32
+  tensor-core math (`allow_tf32` + `float32_matmul_precision="high"`), which
+  accelerates the float32 matrix multiplications that dominate KGE training on
+  Ampere cards like the A100 with negligible accuracy impact. It is a no-op on
+  GPUs without TF32 support.
 - **Batch size** – GPUs handle far larger batches than CPUs, so training and
-  evaluation use bigger batches on a GPU (`GPU_BATCH_SIZE` / `GPU_EVAL_BATCH_SIZE`)
-  and smaller ones on a CPU (`CPU_BATCH_SIZE` / `CPU_EVAL_BATCH_SIZE`). Larger
-  batches keep the GPU busy and train faster; raise `GPU_BATCH_SIZE` further if
-  your GPU has spare memory, or lower it if you hit out-of-memory errors.
+  evaluation use bigger batches on a GPU (`GPU_BATCH_SIZE` / `GPU_EVAL_BATCH_SIZE`,
+  sized for an A100) and smaller ones on a CPU (`CPU_BATCH_SIZE` /
+  `CPU_EVAL_BATCH_SIZE`). Larger batches keep the GPU busy and train faster;
+  raise `GPU_BATCH_SIZE` further if your GPU has spare memory, or lower it if you
+  hit out-of-memory errors.
 - **Data loading** – on a GPU, `GPU_NUM_WORKERS` DataLoader workers plus pinned
   memory overlap batch preparation with compute so the GPU does not idle waiting
   for data.
+- **Focused workload** – to make the most of a single A100, the defaults train
+  **one** strong model (`RotatE`) with a large `EMBEDDING_DIM` (256) for many
+  `EPOCHS` (100) rather than spreading a small budget over four models. This
+  keeps the run narrow and fast while still producing significant detection
+  results. Add more names to `MODELS` (or lower the dim/epochs) to trade quality
+  for a broader comparison or a smaller GPU.
 
 All of these are constants at the top of `pipeline.py`. To run the whole thing
 on a free GPU, see [Run it faster on a free GPU (Google Colab)](#run-it-faster-on-a-free-gpu-google-colab).
