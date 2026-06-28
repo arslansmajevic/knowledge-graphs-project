@@ -33,6 +33,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Iterator, Union
+import time
 
 # --------------------------------------------------------------------------- #
 # A tiny Datalog engine
@@ -166,18 +167,16 @@ def _eval_body(body: list, facts: Facts, index: dict) -> Iterator[dict]:
 
 
 def evaluate(rules: Iterable[Rule], facts: Facts, max_iterations: int = 100) -> Facts:
-    """Run naive bottom-up evaluation to a fixpoint (or ``max_iterations``).
-
-    ``facts`` is not mutated.  ``max_iterations`` bounds the recursion depth,
-    which both guarantees termination and keeps transitive-closure blow-up in
-    check on large graphs (each iteration extends recursive relations by one
-    hop).
-    """
     rules = list(rules)
     derived: Facts = {p: set(rows) for p, rows in facts.items()}
-    for _ in range(max_iterations):
+
+    for iteration in range(1, max_iterations + 1):
+        started = time.perf_counter()
         index = _build_index(derived)
+
         added = False
+        additions = 0
+
         for rule in rules:
             for binding in _eval_body(rule.body, derived, index):
                 for pred, terms in rule.heads:
@@ -185,9 +184,23 @@ def evaluate(rules: Iterable[Rule], facts: Facts, max_iterations: int = 100) -> 
                     bucket = derived.setdefault(pred, set())
                     if new_row not in bucket:
                         bucket.add(new_row)
+                        additions += 1
                         added = True
+
+        counts = {
+            pred: len(rows)
+            for pred, rows in derived.items()
+            if pred in IDB_RELATIONS
+        }
+        elapsed = time.perf_counter() - started
+        print(
+            f"[reason] iteration {iteration}/{max_iterations}: "
+            f"+{additions:,} facts in {elapsed:.1f}s | {counts}"
+        )
+
         if not added:
             break
+
     return derived
 
 
@@ -310,8 +323,13 @@ def facts_from_triples(triples: Iterable[tuple[str, str, str]]) -> Facts:
 
 
 def run(facts: Facts, max_depth: int = 8) -> Facts:
-    """Run the MITRE rule set on ``facts``; ``max_depth`` bounds chain length."""
-    return evaluate(mitre_rules(), facts, max_iterations=max_depth)
+    """Run rules only over facts used by the symbolic program."""
+    relevant = {
+        EDB_AUTHENTICATES_TO: set(facts.get(EDB_AUTHENTICATES_TO, ())),
+        EDB_LOGS_ON_TO: set(facts.get(EDB_LOGS_ON_TO, ())),
+        EDB_USES_SOURCE_COMPUTER: set(facts.get(EDB_USES_SOURCE_COMPUTER, ())),
+    }
+    return evaluate(mitre_rules(), relevant, max_iterations=max_depth)
 
 
 def derived_triples(derived: Facts) -> list[tuple[str, str, str]]:
