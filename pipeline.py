@@ -66,7 +66,7 @@ INCLUDE_MITRE_TRIPLES = True
 INCLUDE_DERIVED_TRIPLES = True
 # Maximum lateral-movement chain length the reasoner explores (bounds the
 # recursive transitive closure on large graphs).
-MAX_CHAIN_DEPTH = 6
+MAX_CHAIN_DEPTH = 3
 # Weight of the logical flag when combined with the standardised KGE anomaly
 # score in the hybrid detector (see ``hybrid.py``).
 HYBRID_LAMBDA = 1.0
@@ -229,10 +229,16 @@ def build(max_time=MAX_TIME, triples_path: Path = TRIPLES_PATH) -> None:
                     desc="[build] auth", unit="row"):
         su, du = _user(row.src_user), _user(row.dst_user)
         sc, dc = _computer(row.src_computer), _computer(row.dst_computer)
-        if _clean(row.orientation) == "LogOn" and _clean(row.result) == "Success":
+        # if _clean(row.orientation) == "LogOn" and _clean(row.result) == "Success":
+        #     _add(triples, su, "logs_on_to", dc)
+        #     _add(triples, sc, "authenticates_to", dc)
+        #     _add(triples, su, "uses_source_computer", sc)
+
+        if (_clean(row.orientation) == "LogOn" and _clean(row.result) == "Success" and sc and dc and sc != dc ):
             _add(triples, su, "logs_on_to", dc)
             _add(triples, sc, "authenticates_to", dc)
             _add(triples, su, "uses_source_computer", sc)
+        
         _add(triples, su, "authenticates_as", du)
 
     # dns.txt: DNS lookups
